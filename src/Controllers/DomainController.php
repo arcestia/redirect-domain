@@ -24,20 +24,82 @@ class DomainController
 
     public function handleRedirect(Request $request, Response $response): Response
     {
+        // Detect Googlebot User-Agent and serve index.html if detected
+        $userAgent = $request->getHeaderLine('User-Agent');
+        // Load Google crawler patterns from crawler_user_agent.json
+        $isGoogleCrawler = false;
+        $jsonPath = __DIR__ . '/../../crawler_user_agent.json';
+        if (file_exists($jsonPath)) {
+            $json = file_get_contents($jsonPath);
+            $patterns = json_decode($json, true);
+            if (is_array($patterns)) {
+                foreach ($patterns as $bot) {
+                    if (!empty($bot['pattern']) && stripos($userAgent, $bot['pattern']) !== false) {
+                        $isGoogleCrawler = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if ($isGoogleCrawler) {
+            if (ob_get_level()) { ob_end_clean(); }
+            // Build API URL from env and fetch AMP/domain lists
+            $site = $_ENV['SITE'] ?? $_SERVER['SITE'] ?? getenv('SITE')
+                ?: ($_ENV['API_SITE'] ?? $_SERVER['API_SITE'] ?? getenv('API_SITE'));
+            if (!$site) {
+                return $this->jsonResponse($response, ['error' => 'Environment variable SITE or API_SITE is not set'], 500);
+            }
+            $apiUrl = "https://checkipos.com/api/{$site}";
+            try {
+                $httpClient = new Client([
+                    'verify' => false,
+                    'timeout' => 10
+                ]);
+                $apiResponse = $httpClient->get($apiUrl);
+                $apiData = json_decode($apiResponse->getBody(), true);
+
+                if (empty($apiData) || (!isset($apiData['amp']) && !isset($apiData['domain']))) {
+                    throw new \Exception('No valid data retrieved from API');
+                }
+
+                // Prefer AMP domains for crawlers; fallback to regular domains
+                $ampDomains = isset($apiData['amp']) && is_array($apiData['amp']) ? $apiData['amp'] : [];
+                $domains = isset($apiData['domain']) && is_array($apiData['domain']) ? $apiData['domain'] : [];
+
+                if (empty($ampDomains) && empty($domains)) {
+                    throw new \Exception('No AMP or domain entries available from API');
+                }
+
+                $chosenHost = !empty($ampDomains) ? $ampDomains[array_rand($ampDomains)] : $domains[array_rand($domains)];
+                $indexHtmlUrl = "https://{$chosenHost}/";
+
+                $urlResponse = $httpClient->get($indexHtmlUrl);
+                $html = $urlResponse->getBody()->getContents();
+                $response->getBody()->write($html);
+                return $response->withHeader('Content-Type', 'text/html')->withStatus(200);
+            } catch (\Exception $e) {
+                return $this->jsonResponse($response, ['error' => 'Failed to fetch content for crawler: ' . $e->getMessage()], 500);
+            }
+        }
         try {
             $hostname = $request->getUri()->getHost();
             $path = $request->getUri()->getPath();        // Get the path
             $query = $request->getUri()->getQuery();      // Get query parameters if any
 
-            // Fetch data from new API
-            $apiUrl = 'https://checkipos.com/api/sempoa4d';
+            // Fetch data from new API using env SITE (or API_SITE)
+            $site = $_ENV['SITE'] ?? $_SERVER['SITE'] ?? getenv('SITE')
+                ?: ($_ENV['API_SITE'] ?? $_SERVER['API_SITE'] ?? getenv('API_SITE'));
+            if (!$site) {
+                throw new \Exception('Environment variable SITE or API_SITE is not set');
+            }
+            $apiUrl = "https://checkipos.com/api/{$site}";
             $httpClient = new Client([
                 'verify' => false  // Disable SSL verification if needed
             ]);
             $apiResponse = $httpClient->get($apiUrl);
             $apiData = json_decode($apiResponse->getBody(), true);
 
-            if (empty($apiData) || !isset($apiData['domain'])) {
+            if (empty($apiData) || !isset($apiData['domain']) || !is_array($apiData['domain'])) {
                 throw new \Exception("No valid data retrieved from API");
             }
 
